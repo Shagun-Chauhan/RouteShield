@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../core/api_client.dart';
+import '../models/destination.dart';
 import '../models/models.dart';
 import '../providers/providers.dart';
 
@@ -58,9 +59,19 @@ class Repository {
   }
 
   // ---------- Routes ----------
-  Future<List<RouteOption>> fetchRoutes(GeoPoint origin, String destination) => _try(
-        () async => _list(await api.get('/routes', {'origin': '${origin.lat},${origin.lng}', 'destination': destination}), 'routes', RouteOption.fromJson),
-        () => _demoRoutes(destination),
+  /// NOTE: `destLat`/`destLng` are sent when the destination was geocoded. The backend must read them
+  /// (and prefer them over re-geocoding the `destination` text) for routes to end at the chosen place.
+  Future<List<RouteOption>> fetchRoutes(GeoPoint origin, Destination destination) => _try(
+        () async => _list(
+            await api.get('/routes', {
+              'origin': '${origin.lat},${origin.lng}',
+              'destination': destination.label,
+              if (destination.point != null) 'destLat': '${destination.point!.lat}',
+              if (destination.point != null) 'destLng': '${destination.point!.lng}',
+            }),
+            'routes',
+            RouteOption.fromJson),
+        () => _demoRoutes(destination.label),
       );
 
   // ---------- Contacts ----------

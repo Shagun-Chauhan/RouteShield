@@ -3,12 +3,13 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import '../core/theme.dart';
+import '../models/destination.dart';
 import '../models/models.dart';
 import '../providers/providers.dart';
 import '../widgets/common.dart';
 
 class RoutesScreen extends ConsumerWidget {
-  final String destination;
+  final Destination destination;
   const RoutesScreen({super.key, required this.destination});
 
   @override
@@ -25,13 +26,13 @@ class RoutesScreen extends ConsumerWidget {
                 icon: Icons.alt_route,
                 title: 'No routes found',
                 message:
-                    'We could not find a route to "$destination". Check the destination and try again.',
+                    'We could not find a route to "${destination.label}". Check the destination and try again.',
                 action: FilledButton(
                     onPressed: () => context.pop(),
                     child: const Text('Change destination')))
             : ListView(padding: pagePadding, children: [
                 const DemoBanner(),
-                Text('To $destination',
+                Text('To ${destination.label}',
                     style: Theme.of(context)
                         .textTheme
                         .titleMedium
@@ -44,26 +45,33 @@ class RoutesScreen extends ConsumerWidget {
                         fontSize: 13)),
                 const SizedBox(height: 14),
                 for (final r in routes)
-                  _RouteCard(route: r, destination: destination),
+                  _RouteCard(route: r, destination: destination.label, all: routes),
               ]),
       ),
     );
   }
 }
 
-class _RouteCard extends StatelessWidget {
+class _RouteCard extends ConsumerWidget {
   final RouteOption route;
   final String destination;
-  const _RouteCard({required this.route, required this.destination});
+  final List<RouteOption> all;
+  const _RouteCard({required this.route, required this.destination, required this.all});
+
+  void _viewOnMap(BuildContext context, WidgetRef ref) {
+    ref.read(routePreviewProvider.notifier).state = RoutePreview(destination, all, route.id);
+    ref.read(selectedRouteProvider.notifier).state = route;
+    context.go('/map');
+  }
 
   void _start(BuildContext context) => showModalBottomSheet(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      builder: (_) => _StartSheet(route: route, destination: destination));
+      builder: (_) => StartJourneySheet(route: route, destination: destination));
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final cs = Theme.of(context).colorScheme;
     final attention = route.segments.where((s) => s.riskLevel != 'low').length;
     return RsCard(
@@ -114,6 +122,11 @@ class _RouteCard extends StatelessWidget {
           ]),
         ],
         const SizedBox(height: 14),
+        OutlinedButton.icon(
+            onPressed: () => _viewOnMap(context, ref),
+            icon: const Icon(Icons.map_outlined),
+            label: const Text('Compare on map')),
+        const SizedBox(height: 10),
         Row(children: [
           Expanded(
               child: OutlinedButton(
@@ -137,20 +150,24 @@ class _RouteCard extends StatelessWidget {
       ]);
 }
 
-class _StartSheet extends ConsumerStatefulWidget {
+class StartJourneySheet extends ConsumerStatefulWidget {
   final RouteOption route;
   final String destination;
-  const _StartSheet({required this.route, required this.destination});
+  const StartJourneySheet({super.key, required this.route, required this.destination});
   @override
-  ConsumerState<_StartSheet> createState() => _StartSheetState();
+  ConsumerState<StartJourneySheet> createState() => _StartJourneySheetState();
 }
 
-class _StartSheetState extends ConsumerState<_StartSheet> {
+class _StartJourneySheetState extends ConsumerState<StartJourneySheet> {
   final _sel = <String>{};
   bool _busy = false;
   int? _mins;
 
   Future<void> _start() async {
+    if (ref.read(activeJourneyProvider) != null) {
+      snack(context, 'A journey is already active. Finish or cancel it first.');
+      return;
+    }
     setState(() => _busy = true);
     final router = GoRouter.of(context);
     final nav = Navigator.of(context);
@@ -162,8 +179,9 @@ class _StartSheetState extends ConsumerState<_StartSheet> {
           _sel.toList());
       ref.read(activeJourneyProvider.notifier).state = j;
       ref.read(selectedRouteProvider.notifier).state = widget.route;
+      ref.read(routePreviewProvider.notifier).state = null;
       nav.pop();
-      router.push('/journey');
+      router.go('/map'); // compact navigation mode lives on the map
     } catch (e) {
       if (mounted) {
         setState(() => _busy = false);

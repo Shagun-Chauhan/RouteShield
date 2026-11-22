@@ -1,6 +1,8 @@
 import 'dart:ui';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:go_router/go_router.dart';
+import '../core/config.dart';
 import '../core/theme.dart';
 import '../providers/providers.dart';
 
@@ -136,20 +138,85 @@ class ErrorView extends StatelessWidget {
       );
 }
 
-/// Shown whenever any data on screen may be sample data.
+/// Shown whenever any data on screen may be sample data. Explains the real cause and lets the
+/// user re-test the connection; it only disappears once the backend actually answers.
 class DemoBanner extends ConsumerWidget {
   const DemoBanner({super.key});
+
+  Future<void> _retry(BuildContext context, WidgetRef ref) async {
+    ref.invalidate(backendProbeProvider);
+    final r = await ref.read(backendProbeProvider.future);
+    if (!context.mounted) return;
+    if (ref.read(apiClientProvider).token == 'demo') {
+      snack(context, 'Server reachable: ${r.reachable}. You are on a demo session, so sign in again with a real account.');
+      return;
+    }
+    if (r.reachable) {
+      ref.read(demoActiveProvider.notifier).state = false;
+      ref.invalidate(havensProvider);
+      ref.invalidate(contactsProvider);
+      ref.invalidate(reportsProvider);
+      ref.invalidate(historyProvider);
+      ref.invalidate(notificationsProvider);
+      snack(context, 'Connected to the RouteShield server.');
+    } else {
+      snack(context, r.detail);
+    }
+  }
+
+  Future<void> _details(BuildContext context, WidgetRef ref) async {
+    final demoSession = ref.read(apiClientProvider).token == 'demo';
+    final probe = await ref.read(backendProbeProvider.future);
+    if (!context.mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Why is demo mode on?'),
+        content: SingleChildScrollView(
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+            Text('API address in this build:\n${AppConfig.apiBaseUrl}', style: const TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            Text('Connection test: ${probe.detail}'),
+            if (demoSession) ...[const SizedBox(height: 8), const Text('You are signed in with a demo session (created when the server could not be reached at login). Sign in again once the server is reachable.')],
+            const SizedBox(height: 8),
+            const Text('Common causes:\n'
+                '• 10.0.2.2 only works from the Android emulator. On a real phone build with --dart-define=API_BASE_URL=http://<PC LAN IP>:4000/api (same Wi-Fi).\n'
+                '• Backend not running or a firewall blocks the port.\n'
+                '• Plain http:// is blocked on Android 9+ unless usesCleartextTraffic is enabled (debug) or you use https.\n'
+                '• Missing INTERNET permission in AndroidManifest.xml.'),
+          ]),
+        ),
+        actions: [TextButton(onPressed: () => Navigator.pop(c), child: const Text('Close'))],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     if (!ref.watch(demoActiveProvider)) return const SizedBox.shrink();
+    final demoSession = ref.watch(authProvider.select((a) => a.token == 'demo'));
     return Container(
       margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.all(12),
+      padding: const EdgeInsets.fromLTRB(12, 10, 6, 6),
       decoration: BoxDecoration(color: RS.amber, borderRadius: BorderRadius.circular(14), border: Border.all(color: RS.amberText.withAlpha(90))),
-      child: const Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
-        Icon(Icons.science_outlined, color: RS.amberText, size: 20),
-        SizedBox(width: 10),
-        Expanded(child: Text('DEMO MODE: the server is not connected. Routes, reports and places are sample data, not live information.', style: TextStyle(color: RS.amberText, fontWeight: FontWeight.w600, fontSize: 13))),
+      child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+        const Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+          Icon(Icons.science_outlined, color: RS.amberText, size: 20),
+          SizedBox(width: 10),
+          Expanded(child: Text('SAMPLE DATA: the RouteShield server is not connected, so routes, reports and places shown from it are samples, not live information. GPS and OpenStreetMap data are still real.', style: TextStyle(color: RS.amberText, fontWeight: FontWeight.w600, fontSize: 13))),
+        ]),
+        Row(mainAxisAlignment: MainAxisAlignment.end, children: [
+          TextButton(onPressed: () => _details(context, ref), child: const Text('Why?')),
+          TextButton(onPressed: () => _retry(context, ref), child: const Text('Retry')),
+          if (demoSession)
+            TextButton(
+              onPressed: () async {
+                await ref.read(authProvider.notifier).logout();
+                if (context.mounted) GoRouter.of(context).go('/login');
+              },
+              child: const Text('Sign in'),
+            ),
+        ]),
       ]),
     );
   }

@@ -1,17 +1,17 @@
 import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:geolocator/geolocator.dart';
 import 'package:go_router/go_router.dart';
 import 'package:intl/intl.dart';
 import 'package:url_launcher/url_launcher.dart';
-import '../core/config.dart';
 import '../core/theme.dart';
 import '../models/models.dart';
+import '../providers/navigation_providers.dart';
 import '../providers/providers.dart';
-import '../services/deviation_detector.dart';
+import '../services/journey_service.dart';
+import '../widgets/map/nav_panels.dart' show RerouteCard;
+import '../services/live_location.dart';
 import '../services/location_service.dart';
-import '../services/notification_service.dart';
 import '../widgets/common.dart';
 
 class ActiveJourneyScreen extends ConsumerStatefulWidget {
@@ -21,66 +21,28 @@ class ActiveJourneyScreen extends ConsumerStatefulWidget {
 }
 
 class _JourneyState extends ConsumerState<ActiveJourneyScreen> {
-  static const _grace = Duration(minutes: 5);
-  final _det = DeviationDetector();
-  StreamSubscription<Position>? _sub;
   Timer? _ticker;
-  late DateTime _nextCheckIn;
-  bool _dueNotified = false, _deviated = false, _saver = false, _gpsOk = true;
-  DateTime? _lastFix;
 
   @override
   void initState() {
     super.initState();
-    final j = ref.read(activeJourneyProvider);
-    _nextCheckIn = DateTime.now().add(Duration(minutes: j?.checkInMinutes ?? 15));
     _ticker = Timer.periodic(const Duration(seconds: 1), (_) => _tick());
-    _startLocation();
-  }
-
-  Future<void> _startLocation() async {
-    await _sub?.cancel();
-    final ok = await LocationService.ensurePermission();
-    if (!mounted) return;
-    setState(() => _gpsOk = ok);
-    if (!ok) return;
-    final prefs = ref.read(sharedPrefsProvider);
-    final path = ref.read(selectedRouteProvider)?.path ?? const <GeoPoint>[];
-    _sub = LocationService.stream(saver: _saver).listen((pos) {
-      final p = GeoPoint(pos.latitude, pos.longitude);
-      LocationService.save(prefs, p);
-      if (mounted) setState(() { _lastFix = DateTime.now(); _gpsOk = true; });
-      if (path.isNotEmpty && !_deviated && _det.update(p, pos.accuracy, path)) {
-        setState(() => _deviated = true);
-        NotificationService.instance.show(2, 'You may be off route', 'Open RouteShield to review alternatives.');
-      }
-    }, onError: (_) {
-      if (mounted) setState(() => _gpsOk = false);
-    });
   }
 
   void _tick() {
-    if (!mounted) return;
-    final now = DateTime.now();
-    if (!_dueNotified && now.isAfter(_nextCheckIn)) {
-      _dueNotified = true;
-      NotificationService.instance.show(1, 'Check-in due', 'Tap to confirm you are okay.');
-    }
-    setState(() {});
+    if (mounted) setState(() {}); // refresh countdown; reminders themselves run in NavigationController
   }
 
   @override
   void dispose() {
-    _sub?.cancel();
     _ticker?.cancel();
     super.dispose();
   }
 
   Future<void> _checkIn(Journey j) async {
-    await ref.read(repositoryProvider).checkIn(j.id);
+    final err = await ref.read(navigationProvider.notifier).checkIn();
     if (!mounted) return;
-    setState(() { _nextCheckIn = DateTime.now().add(Duration(minutes: j.checkInMinutes)); _dueNotified = false; });
-    snack(context, 'Checked in. Next reminder in ${j.checkInMinutes} min.');
+    snack(context, err ?? 'Checked in. Next reminder in ${j.checkInMinutes} min.');
   }
 
   /// Opens the SMS app pre-filled. RouteShield never sends anything without the user's confirmation.
@@ -101,7 +63,7 @@ class _JourneyState extends ConsumerState<ActiveJourneyScreen> {
       ),
     );
     if (ok != true) return;
-    final where = last == null ? 'Location unavailable.' : 'Last location (${DateFormat('HH:mm').format(last.at)}): https://maps.google.com/?q=${last.point.lat},${last.point.lng}';
+    final where = last == null ? 'Location unavailable.' : 'Last location (${DateFormat('HH:mm').format(last.at)}): https://www.openstreetmap.org/?mlat=${last.point.lat}&mlon=${last.point.lng}#map=17/${last.point.lat}/${last.point.lng}';
     final body = missed ? 'I missed a check-in on my RouteShield journey to ${j.destination}. I may be fine, but please check on me. $where' : 'My RouteShield journey to ${j.destination}. $where';
     final uri = Uri(scheme: 'sms', path: contacts.first.phone, queryParameters: {'body': body});
     final launched = await launchUrl(uri);
@@ -109,36 +71,31 @@ class _JourneyState extends ConsumerState<ActiveJourneyScreen> {
   }
 
   Future<void> _finish(Journey j, {bool cancel = false}) async {
-    await ref.read(repositoryProvider).completeJourney(j.id, cancelled: cancel);
-    ref.read(activeJourneyProvider.notifier).state = null;
-    ref.read(selectedRouteProvider.notifier).state = null;
-    if (mounted) {
-      snack(context, cancel ? 'Journey cancelled.' : 'Journey completed. Glad you arrived.');
-      context.go('/home');
+    final err = await ref.read(journeyServiceProvider).finish(j, cancel: cancel);
+    if (!mounted) return;
+    if (err != null) {
+      snack(context, err);
+      return;
     }
+    snack(context, cancel ? 'Journey cancelled.' : 'Journey completed. Glad you arrived.');
+    context.go('/home');
   }
 
   @override
   Widget build(BuildContext context) {
-    void applySaver() {
-      final low = (ref.read(batteryProvider).valueOrNull ?? 100) <= AppConfig.lowBatteryThreshold;
-      final want = low || ref.read(survivalModeProvider);
-      if (want != _saver) {
-        _saver = want;
-        _startLocation();
-      }
-    }
-
-    ref.listen<AsyncValue<int>>(batteryProvider, (prev, next) => applySaver());
-    ref.listen<bool>(survivalModeProvider, (prev, next) => applySaver());
+    final nav = ref.watch(navigationProvider);
+    final posState = ref.watch(livePositionProvider);
+    final access = ref.watch(locationAccessProvider).valueOrNull;
+    final saver = ref.watch(survivalModeProvider);
+    final gpsOk = (access == null || access == LocationAccess.granted) && !posState.hasError;
     final j = ref.watch(activeJourneyProvider);
     if (j == null) {
       return PageScaffold(title: 'Journey', child: EmptyView(icon: Icons.navigation_outlined, title: 'No active journey', message: 'Plan a journey to see live status here.', action: FilledButton(onPressed: () => context.go('/search'), child: const Text('Plan a journey'))));
     }
     final now = DateTime.now();
-    final remaining = _nextCheckIn.difference(now);
-    final due = remaining.isNegative;
-    final missed = due && now.isAfter(_nextCheckIn.add(_grace));
+    final remaining = (nav.nextCheckIn ?? now).difference(now);
+    final due = nav.checkInDue;
+    final missed = nav.checkInMissed;
     String mmss(Duration d) => '${d.inMinutes.abs().toString().padLeft(2, '0')}:${(d.inSeconds.abs() % 60).toString().padLeft(2, '0')}';
     final last = LocationService.load(ref.read(sharedPrefsProvider));
     return PageScaffold(
@@ -173,25 +130,13 @@ class _JourneyState extends ConsumerState<ActiveJourneyScreen> {
         else
           FilledButton.icon(onPressed: () => _checkIn(j), icon: const Icon(Icons.check_circle_outline), label: const Text("Check in: I'm okay")),
         const SizedBox(height: 12),
-        if (_deviated)
-          RsCard(
-            color: RS.amber,
-            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-              const Text('You appear to be off route', style: TextStyle(fontWeight: FontWeight.w800, color: RS.amberText, fontSize: 16)),
-              const SizedBox(height: 4),
-              const Text('Several recent location readings were away from your route. Detours are fine if intended.', style: TextStyle(color: RS.amberText)),
-              const SizedBox(height: 12),
-              FilledButton(onPressed: () => context.push('/routes', extra: j.destination), child: const Text('Recover route')),
-              const SizedBox(height: 8),
-              OutlinedButton(onPressed: () { _det.reset(); setState(() => _deviated = false); }, child: const Text("I'm fine, continue")),
-            ]),
-          ),
+        const RerouteCard(),
         RsCard(
           child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
-            Row(children: [Icon(_gpsOk ? Icons.gps_fixed : Icons.gps_off), const SizedBox(width: 8), Expanded(child: Text(_gpsOk ? (_saver ? 'Battery saver: fewer location updates' : 'Live tracking on') : 'Live tracking unavailable', style: const TextStyle(fontWeight: FontWeight.w700)))]),
+            Row(children: [Icon(gpsOk ? Icons.gps_fixed : Icons.gps_off), const SizedBox(width: 8), Expanded(child: Text(gpsOk ? (saver ? 'Battery saver: fewer location updates' : 'Live tracking on') : 'Live tracking unavailable', style: const TextStyle(fontWeight: FontWeight.w700)))]),
             const SizedBox(height: 6),
-            Text(last == null ? 'No location recorded yet.' : 'Last recorded location: ${DateFormat('HH:mm:ss').format(last.at)}${_lastFix == null ? ' (from earlier)' : ''}'),
-            if (!_gpsOk) const Padding(padding: EdgeInsets.only(top: 6), child: Text('Turn on Location and allow permission to enable tracking.')),
+            Text(last == null ? 'No location recorded yet.' : 'Last recorded location: ${DateFormat('HH:mm:ss').format(last.at)}${nav.fixAt == null ? ' (from earlier)' : ''}'),
+            if (!gpsOk) const Padding(padding: EdgeInsets.only(top: 6), child: Text('Turn on Location and allow permission to enable tracking.')),
           ]),
         ),
         const SizedBox(height: 4),

@@ -1,4 +1,5 @@
 import 'package:go_router/go_router.dart';
+import 'models/destination.dart';
 import 'models/models.dart';
 import 'screens/auth_screens.dart';
 import 'screens/battery_screen.dart';
@@ -37,7 +38,10 @@ final appRouter = GoRouter(
       ],
     ),
     GoRoute(path: '/search', builder: (c, s) => const SearchScreen()),
-    GoRoute(path: '/routes', builder: (c, s) => RoutesScreen(destination: s.extra as String? ?? '')),
+    GoRoute(path: '/routes', builder: (c, s) {
+      final e = s.extra;
+      return RoutesScreen(destination: e is Destination ? e : Destination(e is String ? e : ''));
+    }),
     GoRoute(path: '/segments', builder: (c, s) => SegmentsScreen(route: s.extra as RouteOption)),
     GoRoute(path: '/journey', builder: (c, s) => const ActiveJourneyScreen()),
     GoRoute(path: '/contacts', builder: (c, s) => const ContactsScreen()),
